@@ -339,6 +339,7 @@ private fun DenseBookRow(
             }
         }
     }
+
     pendingAction?.let { action ->
         AlertDialog(
             onDismissRequest = { pendingAction = null },

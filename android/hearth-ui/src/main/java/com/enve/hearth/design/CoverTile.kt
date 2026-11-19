@@ -189,7 +189,6 @@ private fun stableCoverCacheKey(url: String): String {
 
     return "cover:${scheme.lowercase()}://${host.lowercase()}$port$path$query"
 }
-
 private val COVER_CACHE_KEY_IGNORED_QUERY_PARAMS = setOf(
     "token",
     "access_token",

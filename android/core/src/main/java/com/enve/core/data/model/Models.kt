@@ -15,6 +15,7 @@ data class Book(
     val duration: Long = 0L,
     val currentTime: Long = 0L,
     val isFinished: Boolean = false,
+
     val source: BookSource = BookSource.GRIMMORY,
     val mediaType: AppMediaType = AppMediaType.AUDIOBOOK,
     val readStatus: ReadStatus = ReadStatus.UNREAD,

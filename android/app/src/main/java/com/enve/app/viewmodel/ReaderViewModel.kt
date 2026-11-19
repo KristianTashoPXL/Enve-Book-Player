@@ -377,6 +377,8 @@ class ReaderViewModel @Inject constructor(
         private const val PROGRESS_PUSH_MAX_WAIT_MS = 15_000L
         private const val RESTORED_SENTENCE_WINDOW_MS = 120_000L
         private const val VIEWPORT_SETTLE_MS = 350L
+        private const val READ_ALOUD_FOLLOW_SUPPRESS_MS = 2_500L
+        private const val READ_ALOUD_FOLLOW_DEAD_BAND_PX = 24.0
     }
 
     private val _state = MutableStateFlow(ReaderUiState())
@@ -444,6 +446,10 @@ class ReaderViewModel @Inject constructor(
     private var readAloudTimelinePrepared: Boolean = false
     private var restoredReadAloudFragment: String? = null
     private var restoredReadAloudFragmentAtMs: Long = 0L
+    private var readAlongFollowChapterHref: String? = null
+    private var readAlongFollowing: Boolean = false
+    private var readAlongUserScrollActive: Boolean = false
+    private var readAlongSuppressUntilMs: Long = 0L
 
     private var positions: List<Locator> = emptyList()
     private var pageMarkers: List<EpubPageMarker> = emptyList()
@@ -1065,6 +1071,10 @@ class ReaderViewModel @Inject constructor(
         submitCurrentReadAloudCheckpoint()
         mediaOverlayEngine?.release()
         mediaOverlayEngine = null
+        readAlongFollowChapterHref = null
+        readAlongFollowing = false
+        readAlongUserScrollActive = false
+        readAlongSuppressUntilMs = 0L
         _state.update {
             it.copy(
                 readAlongSupported = false,
@@ -1258,6 +1268,10 @@ class ReaderViewModel @Inject constructor(
         readAloudCheckpointRevision = 0L
         latestReadAloudLocator = null
         readAloudTimelinePrepared = false
+        readAlongFollowChapterHref = null
+        readAlongFollowing = false
+        readAlongUserScrollActive = false
+        readAlongSuppressUntilMs = 0L
         val engine = buildMediaOverlayEngine(pub, epubFile, checkpointToken)
         mediaOverlayEngine = engine
         val supportsReadAlong = engine.detectsSmil()
@@ -2534,11 +2548,7 @@ class ReaderViewModel @Inject constructor(
             try {
                 nav.goForward(animated = true)
             } finally {
-                readAlongSyncJob?.cancel()
-                readAlongSyncJob = viewModelScope.launch {
-                    delay(800)
-                    audioIsNavigating = false
-                }
+                scheduleAudioNavClear()
             }
         }
     }
@@ -2549,27 +2559,54 @@ class ReaderViewModel @Inject constructor(
         locator: Locator,
     ) {
         if (!_state.value.prefs.readAloudAutoTurn || isTextSelectionActive()) return
+        if (isReadAlongAutoFollowSuppressed()) return
+
         val fragmentId = clip.textFragmentId ?: return
         val currentHref = normalizePublicationHref(nav.currentLocator.value.href.toString())
         val clipHref = normalizePublicationHref(clip.textHref)
 
-        if (clipHref == currentHref && isReadAlongFragmentVisible(fragmentId, nav)) {
+        if (clipHref != currentHref) {
+            readAlongFollowChapterHref = clipHref
+            readAlongFollowing = false
+            audioIsNavigating = true
+            try {
+                nav.go(locator)
+            } finally {
+                scheduleAudioNavClear()
+            }
+            return
+        }
+        if (readAlongFollowChapterHref != clipHref) {
+            readAlongFollowChapterHref = clipHref
+            readAlongFollowing = false
+        }
+
+        if (!_state.value.prefs.scroll) {
+            if (isReadAlongFragmentVisible(fragmentId, nav)) return
+            audioIsNavigating = true
+            try {
+                nav.go(locator)
+            } finally {
+                scheduleAudioNavClear()
+            }
             return
         }
 
+        val metrics = readAlongFragmentMetrics(fragmentId, nav) ?: return
+        val centerView = metrics.top + metrics.height / 2.0
+        val centerTarget = metrics.viewportHeight / 2.0
+
+        if (!readAlongFollowing) {
+            if (centerView + READ_ALOUD_FOLLOW_DEAD_BAND_PX < centerTarget) return
+            readAlongFollowing = true
+        }
+        if (kotlin.math.abs(centerView - centerTarget) < READ_ALOUD_FOLLOW_DEAD_BAND_PX) return
+
         audioIsNavigating = true
         try {
-            if (clipHref == currentHref && _state.value.prefs.scroll) {
-                scrollReadAlongFragmentIntoView(fragmentId, nav)
-            } else {
-                nav.go(locator)
-            }
+            scrollReadAlongFragmentToCenter(fragmentId, nav)
         } finally {
-            readAlongSyncJob?.cancel()
-            readAlongSyncJob = viewModelScope.launch {
-                delay(800)
-                audioIsNavigating = false
-            }
+            scheduleAudioNavClear()
         }
     }
 
@@ -2697,6 +2734,10 @@ class ReaderViewModel @Inject constructor(
         readAlongPageFlipJob?.cancel()
         readAlongPageFlipJob = null
         audioIsNavigating = false
+        readAlongFollowChapterHref = null
+        readAlongFollowing = false
+        readAlongUserScrollActive = false
+        readAlongSuppressUntilMs = 0L
         _state.update {
             it.copy(
                 readAlongActive = false,
@@ -2883,13 +2924,64 @@ class ReaderViewModel @Inject constructor(
         )
     }
 
-    private suspend fun scrollReadAlongFragmentIntoView(fragmentId: String, nav: EpubNavigatorFragment) {
-        val safeId = fragmentId.replace("\\", "\\\\").replace("'", "\\'")
+    private fun isReadAlongAutoFollowSuppressed(): Boolean =
+        readAlongUserScrollActive ||
+                android.os.SystemClock.elapsedRealtime() < readAlongSuppressUntilMs
+
+    private fun scheduleAudioNavClear() {
+        readAlongSyncJob?.cancel()
+        readAlongSyncJob = viewModelScope.launch {
+            delay(800)
+            audioIsNavigating = false
+        }
+    }
+
+    private data class ReadAlongFragmentMetrics(
+        val top: Double,
+        val height: Double,
+        val viewportHeight: Double,
+    )
+
+    private suspend fun readAlongFragmentMetrics(
+        fragmentId: String,
+        nav: EpubNavigatorFragment,
+    ): ReadAlongFragmentMetrics? {
+        val safeId = org.json.JSONObject.quote(fragmentId)
         val script = """
             (function() {
-                const el = document.getElementById('$safeId');
+                const el = document.getElementById($safeId);
+                if (!el) return null;
+                const rect = el.getBoundingClientRect();
+                if (rect.height <= 0) return null;
+                return JSON.stringify({
+                    top: rect.top,
+                    height: rect.height,
+                    viewportHeight: window.innerHeight
+                });
+            })();
+        """.trimIndent()
+        val decoded = decodeJavaScriptStringResult(nav.evaluateJavascript(script)) ?: return null
+        val json = runCatching { org.json.JSONObject(decoded) }.getOrNull() ?: return null
+        return ReadAlongFragmentMetrics(
+            top = json.optDouble("top", 0.0),
+            height = json.optDouble("height", 0.0),
+            viewportHeight = json.optDouble("viewportHeight", 0.0),
+        )
+    }
+
+    private suspend fun scrollReadAlongFragmentToCenter(
+        fragmentId: String,
+        nav: EpubNavigatorFragment,
+    ) {
+        val safeId = org.json.JSONObject.quote(fragmentId)
+        val script = """
+            (function() {
+                const el = document.getElementById($safeId);
                 if (!el) return false;
-                el.scrollIntoView({ behavior: 'auto', block: 'center' });
+                const rect = el.getBoundingClientRect();
+                if (rect.height <= 0) return false;
+                const target = window.scrollY + rect.top + rect.height / 2 - window.innerHeight / 2;
+                window.scrollTo({ top: target, behavior: 'smooth' });
                 return true;
             })();
         """.trimIndent()
@@ -3073,6 +3165,9 @@ class ReaderViewModel @Inject constructor(
     }
 
     fun setReadiumScrollActive(active: Boolean) {
+        if (_state.value.readAlongActive) {
+            readAlongUserScrollActive = active
+        }
         if (!active) {
             readiumScrollCaptureJob?.cancel()
             readiumScrollCaptureJob = null
@@ -3090,6 +3185,10 @@ class ReaderViewModel @Inject constructor(
     }
 
     fun finishReadiumScroll() {
+        if (_state.value.readAlongActive) {
+            readAlongSuppressUntilMs =
+                android.os.SystemClock.elapsedRealtime() + READ_ALOUD_FOLLOW_SUPPRESS_MS
+        }
         setReadiumScrollActive(false)
         if (!_state.value.prefs.scroll || _state.value.readAlongActive || readiumLayoutInProgress) return
         val nav = navigator ?: return

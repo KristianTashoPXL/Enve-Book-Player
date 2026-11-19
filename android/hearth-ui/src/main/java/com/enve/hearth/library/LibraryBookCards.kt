@@ -156,12 +156,13 @@ private fun GridCoverCell(
         Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.BottomCenter) {
             Box(
                 Modifier
-                    .fillMaxWidth(coverAspectRatio(book.mediaType))
+                    .fillMaxWidth(coverAspectRatio(book))
                     .then(if (selected) Modifier.border(2.dp, palette.ember, RoundedCornerShape(Hearth.Radius.Inner)) else Modifier),
             ) {
                 CoverTile(
                     model = book.coverUrl,
                     mediaType = book.mediaType,
+                    aspectRatioOverride = coverAspectRatio(book),
                     modifier = Modifier.fillMaxWidth(),
                     contentDescription = book.title,
                     progress = com.enve.hearth.design.HearthFormat.progress(book),
@@ -279,6 +280,7 @@ private fun DenseBookRow(
         CoverTile(
             model = book.coverUrl,
             mediaType = book.mediaType,
+            aspectRatioOverride = coverAspectRatio(book),
             modifier = Modifier.width(44.dp),
             contentDescription = book.title,
             progress = com.enve.hearth.design.HearthFormat.progress(book),

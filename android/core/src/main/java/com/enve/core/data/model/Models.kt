@@ -11,6 +11,7 @@ data class Book(
     val narrator: String? = null,
     val description: String? = null,
     val coverUrl: String? = null,
+    val coverAspectRatio: Float? = null,
     val duration: Long = 0L,
     val currentTime: Long = 0L,
     val isFinished: Boolean = false,
